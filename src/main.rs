@@ -42,7 +42,7 @@ use crate::diff::{dijkstra, unchanged};
 use crate::display::hunks::{matched_pos_to_hunks, merge_adjacent};
 use crate::parse::guess_language::language_globs;
 use crate::parse::syntax;
-use diff::changes::ChangeMap;
+use diff::changes::{ChangeKind, ChangeMap};
 use diff::dijkstra::ExceededGraphLimit;
 use display::context::opposite_positions;
 use exit_codes::{EXIT_FOUND_CHANGES, EXIT_SUCCESS};
@@ -64,6 +64,7 @@ use diff::sliders::fix_all_sliders;
 use options::{DiffOptions, DisplayMode, DisplayOptions, FileArgument, Mode};
 use owo_colors::OwoColorize;
 use rayon::prelude::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{env, path::Path};
@@ -73,8 +74,11 @@ use syntax::init_next_prev;
 use typed_arena::Arena;
 
 use crate::{
-    dijkstra::mark_syntax, lines::MaxLine, parse::syntax::init_all_info,
+    dijkstra::mark_syntax,
+    lines::MaxLine,
+    parse::syntax::init_all_info,
     parse::tree_sitter_parser as tsp,
+    syntax::{FeatureVec, Syntax, SyntaxId},
 };
 
 extern crate pretty_env_logger;
@@ -325,6 +329,39 @@ fn check_only_text(
     }
 }
 
+fn evaluate_syntax_feature_vec(novel_nodes: &FxHashSet<SyntaxId>, syntax: &Syntax) -> FeatureVec {
+    let is_novel = |syntax: &Syntax| -> bool { novel_nodes.contains(&syntax.id()) };
+    match syntax {
+        Syntax::List { children, .. } => {
+            let mut val = FeatureVec::zero();
+            if is_novel(syntax) {
+                val += syntax.feature_vec();
+            }
+            for &child in children {
+                val += evaluate_syntax_feature_vec(novel_nodes, child);
+            }
+            val.normalized()
+        }
+        Syntax::Atom { .. } if is_novel(syntax) => syntax.feature_vec(),
+        _ => FeatureVec::zero(),
+    }
+}
+
+fn evaluate_feature_vec(
+    novel_nodes: &FxHashSet<SyntaxId>,
+    lhs: &[&Syntax],
+    rhs: &[&Syntax],
+) -> FeatureVec {
+    let mut val = FeatureVec::zero();
+    for &syntax in lhs {
+        val += evaluate_syntax_feature_vec(novel_nodes, syntax).normalized();
+    }
+    for &syntax in rhs {
+        val += evaluate_syntax_feature_vec(novel_nodes, syntax).normalized();
+    }
+    val.normalized()
+}
+
 fn diff_file_content(
     display_path: &str,
     old_path: Option<String>,
@@ -410,6 +447,9 @@ fn diff_file_content(
                         diff_options,
                     ) {
                         Ok((lhs, rhs)) => {
+                            // println!("======== LHS Tree =========\n{:#?}", lhs_tree);
+                            // println!("======== LHS Syntax =======\n{:#?}", lhs);
+
                             if diff_options.check_only {
                                 let file_format = match language {
                                     Some(language) => FileFormat::SupportedLanguage(language),
@@ -438,6 +478,9 @@ fn diff_file_content(
                                 unchanged::mark_unchanged(&lhs, &rhs, &mut change_map)
                             };
 
+                            // println!("===== Change Map ===========\n{:#?}", change_map);
+                            // println!("===== Possibly Changed =====\n{:#?}", possibly_changed);
+
                             let mut exceeded_graph_limit = false;
 
                             for (lhs_section_nodes, rhs_section_nodes) in possibly_changed {
@@ -457,6 +500,17 @@ fn diff_file_content(
                                     }
                                 }
                             }
+
+                            // println!("===== Change Map ===========\n{:#?}", change_map);
+
+                            let novel_nodes = change_map.novel_nodes();
+
+                            // println!("===== Novel Nodes ==========\n{:?}", novel_nodes);
+                            // println!("======== LHS Syntax =======\n{:#?}", lhs[0]);
+                            // println!("======== RHS Syntax =======\n{:#?}", rhs[0]);
+
+                            println!("{}", evaluate_feature_vec(&novel_nodes, &lhs, &rhs));
+                            std::process::exit(0);
 
                             if exceeded_graph_limit {
                                 let lhs_positions =

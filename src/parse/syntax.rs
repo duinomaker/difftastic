@@ -2,7 +2,8 @@
 
 #![allow(clippy::mutable_key_type)] // Hash for Syntax doesn't use mutable fields.
 
-use std::{cell::Cell, collections::HashMap, env, fmt, hash::Hash, num::NonZeroU32};
+use owo_colors::OwoColorize;
+use std::{cell::Cell, collections::HashMap, env, fmt, hash::Hash, num::NonZeroU32, ops};
 use typed_arena::Arena;
 
 use crate::{
@@ -67,6 +68,16 @@ pub struct SyntaxInfo<'a> {
 }
 
 impl<'a> SyntaxInfo<'a> {
+    pub fn is_macro(&self) -> bool {
+        let prev_sib = self.previous_sibling.get();
+        let next_sib = self.next_sibling.get();
+        matches!(prev_sib, Some(Atom { .. }))
+            && !matches!(prev_sib.unwrap().feature_kind(), FeatureKind::Attribute)
+            && matches!(next_sib, Some(List { .. }))
+    }
+}
+
+impl<'a> SyntaxInfo<'a> {
     pub fn new() -> Self {
         Self {
             previous_sibling: Cell::new(None),
@@ -107,6 +118,138 @@ pub enum Syntax<'a> {
     },
 }
 
+#[derive(Debug)]
+pub enum FeatureKind {
+    NormalList,
+    AList,
+    BList,
+    CList,
+    DList,
+    OtherList,
+    Normal,
+    Macro,
+    Attribute,
+    String,
+    Type,
+    Keyword,
+    Other,
+    Error,
+}
+
+const FeatureVecDimensions: usize = 10;
+
+#[derive(Debug)]
+pub struct FeatureVec([f64; FeatureVecDimensions]);
+
+impl fmt::Display for FeatureVec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+
+impl FeatureVec {
+    pub fn zero() -> Self {
+        Self([0.0; FeatureVecDimensions])
+    }
+
+    pub fn normalized(self) -> Self {
+        let length2: f64 = self.0.iter().map(|a| a.powf(2.0)).sum();
+        if length2 < 0.001 {
+            Self::zero()
+        } else {
+            self * (1.0 / length2.powf(0.5))
+        }
+    }
+
+    fn base(axis: usize) -> Self {
+        let mut val = Self::zero();
+        val.0[axis] = 1.0;
+        val
+    }
+}
+
+impl ops::Add<FeatureVec> for FeatureVec {
+    type Output = FeatureVec;
+
+    fn add(self, rhs: FeatureVec) -> Self::Output {
+        let mut val = self.0;
+        for (i, item) in val.iter_mut().enumerate() {
+            *item += rhs.0[i];
+        }
+        Self(val)
+    }
+}
+
+impl ops::AddAssign<FeatureVec> for FeatureVec {
+    fn add_assign(&mut self, rhs: FeatureVec) {
+        for (i, item) in self.0.iter_mut().enumerate() {
+            *item += rhs.0[i];
+        }
+    }
+}
+
+impl ops::Mul<f64> for FeatureVec {
+    type Output = FeatureVec;
+
+    fn mul(self, rhs: f64) -> Self::Output {
+        let mut val = self.0;
+        for item in val.iter_mut() {
+            *item *= rhs;
+        }
+        Self(val)
+    }
+}
+
+impl<'a> Syntax<'a> {
+    fn feature_kind(&self) -> FeatureKind {
+        match self {
+            List {
+                ref open_content, ..
+            } => match &open_content[..] {
+                "" => FeatureKind::NormalList,
+                "(" => FeatureKind::AList,
+                "[" => FeatureKind::BList,
+                "{" => FeatureKind::CList,
+                "|" => FeatureKind::DList,
+                _ => FeatureKind::OtherList,
+            },
+            Atom {
+                ref info,
+                kind,
+                ref content,
+                ..
+            } => match kind {
+                AtomKind::Normal => match &content[..] {
+                    "!" if info.is_macro() => FeatureKind::Macro,
+                    "#" => FeatureKind::Attribute,
+                    _ => FeatureKind::Normal,
+                },
+                AtomKind::String => FeatureKind::String,
+                AtomKind::Type => FeatureKind::Type,
+                AtomKind::Keyword => FeatureKind::Keyword,
+                AtomKind::TreeSitterError => FeatureKind::Error,
+                _ => FeatureKind::Other,
+            },
+        }
+    }
+
+    pub fn feature_vec(&self) -> FeatureVec {
+        match self.feature_kind() {
+            FeatureKind::NormalList | FeatureKind::OtherList => FeatureVec::base(0) * 0.1,
+            FeatureKind::AList => FeatureVec::base(1) * 0.3,
+            FeatureKind::BList => FeatureVec::base(2) * 3.0,
+            FeatureKind::CList => FeatureVec::base(3) * 1.5,
+            FeatureKind::DList => FeatureVec::base(4) * 8.0,
+            FeatureKind::Normal | FeatureKind::Other => FeatureVec::base(5) * 0.05,
+            FeatureKind::Macro => FeatureVec::base(6) * 3.8,
+            FeatureKind::Attribute => FeatureVec::base(7) * 3.8,
+            FeatureKind::String | FeatureKind::Error => FeatureVec::zero(),
+            FeatureKind::Type => FeatureVec::base(8) * 0.5,
+            FeatureKind::Keyword => FeatureVec::base(9) * 0.35,
+        }
+    }
+}
+
 fn dbg_pos(pos: &[SingleLineSpan]) -> String {
     match pos {
         [] => "-".into(),
@@ -137,6 +280,7 @@ impl<'a> fmt::Debug for Syntax<'a> {
                 ));
 
                 ds.field("open_content", &open_content)
+                    .field("feature", &format!("{:?}", self.feature_kind()))
                     .field("open_position", &dbg_pos(open_position))
                     .field("children", &children)
                     .field("close_content", &close_content)
@@ -166,6 +310,7 @@ impl<'a> fmt::Debug for Syntax<'a> {
                     self.content_id()
                 ));
                 ds.field("content", &content);
+                ds.field("feature", &format!("{:?}", self.feature_kind()));
                 ds.field("position", &dbg_pos(position));
 
                 if env::var("DFT_VERBOSE").is_ok() {

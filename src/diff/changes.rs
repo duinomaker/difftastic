@@ -1,6 +1,7 @@
 //! Data types that track the change state for syntax nodes.
 
-use rustc_hash::FxHashMap;
+use itertools::Itertools;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::parse::syntax::{Syntax, SyntaxId};
 
@@ -23,6 +24,16 @@ impl<'a> ChangeMap<'a> {
 
     pub fn get(&self, node: &Syntax<'a>) -> Option<ChangeKind<'a>> {
         self.changes.get(&node.id()).copied()
+    }
+
+    pub fn novel_nodes(&self) -> FxHashSet<SyntaxId> {
+        self.changes
+            .iter()
+            .filter_map(|kv| match kv {
+                (&id, ChangeKind::Novel) => Some(id),
+                _ => None,
+            })
+            .collect()
     }
 }
 

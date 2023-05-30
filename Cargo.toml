@@ -4,12 +4,12 @@ description = "A structural diff that understands syntax."
 repository = "https://github.com/wilfred/difftastic"
 homepage = "http://difftastic.wilfred.me.uk/"
 license = "MIT"
-version = "0.48.0"
-authors = ["Wilfred Hughes <me@wilfred.me.uk>"]
+version = "0.48.0-featvec"
+authors = ["Wilfred Hughes <me@wilfred.me.uk>", "Yuxuan Dai <duinomaker@gmail.com>"]
 keywords = ["diff", "syntax"]
 categories = ["development-tools", "command-line-utilities", "parser-implementations"]
 edition = "2018"
-rust-version = "1.57.0"
+rust-version = "1.65.0"
 include = [
         "/build.rs",
         "/src/",
